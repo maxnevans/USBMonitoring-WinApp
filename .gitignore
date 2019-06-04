@@ -1,0 +1,5 @@
+.vs/**
+distrib/**
+support/**
+*.vcxproj.user
+*.aps
