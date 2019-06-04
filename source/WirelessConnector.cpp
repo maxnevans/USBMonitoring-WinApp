@@ -4,11 +4,13 @@
 
 WirelessConnector::WirelessConnector(std::string ip, std::string port)
 {
+	this->voltageNonTS = 0;
+	this->amperageNonTS = 0;
+
 	WSADATA wsaData;
 	this->socket = INVALID_SOCKET;
-	struct addrinfo* result = NULL,
-		* ptr = NULL,
-		hints;
+	addrinfo* result = NULL;
+	addrinfo hints;
 	int iResult;
 
 	
@@ -43,30 +45,25 @@ WirelessConnector::WirelessConnector(std::string ip, std::string port)
 	}
 
 	freeaddrinfo(result);
+
+	this->hMutex = CreateMutex(NULL, FALSE, NULL);
+	if (this->hThreadReciever == INVALID_HANDLE_VALUE)
+		throw Exception(L"failed to create reciever mutex");
+
+	this->hThreadReciever = CreateThread(NULL, 0, WirelessConnector::ThreadProcedure, this, 0, NULL);
+	if (this->hThreadReciever == INVALID_HANDLE_VALUE)
+		throw Exception(L"failed to create reciever thread");
 }
 
 WirelessConnector::~WirelessConnector()
 {
+	TerminateThread(this->hThreadReciever, 0);
+
+	CloseHandle(this->hThreadReciever);
+	CloseHandle(this->hMutex);
+
 	closesocket(this->socket);
 	WSACleanup();
-}
-
-int WirelessConnector::GetVoltage()
-{
-	UARTPacket pack;
-	pack.id = UPID_VOLTAGE;
-	this->SendPacket(pack);
-	this->RecievePacket(pack);
-	return static_cast<uint16_t>(pack.data);
-}
-
-int WirelessConnector::GetAmperage()
-{
-	UARTPacket pack;
-	pack.id = UPID_AMPERAGE;
-	this->SendPacket(pack);
-	this->RecievePacket(pack);
-	return static_cast<uint16_t>(pack.data);
 }
 
 void WirelessConnector::SendPacket(UARTPacket packet)
@@ -108,4 +105,93 @@ void WirelessConnector::RecievePacket(UARTPacket& packet)
 
 	packet.id = *reinterpret_cast<uint16_t*>(buffer);
 	packet.data = *reinterpret_cast<uint16_t*>(buffer + 2);
+}
+
+DWORD WINAPI WirelessConnector::ThreadProcedure(_In_ LPVOID lpParameter)
+{
+	WirelessConnector* wc = reinterpret_cast<WirelessConnector*>(lpParameter);
+
+	UARTPacket voltage;
+	voltage.id = IDeviceConnector::UPID_VOLTAGE;
+	voltage.data = 0;
+	UARTPacket amperage;
+	amperage.id = IDeviceConnector::UPID_AMPERAGE;
+	amperage.data = 0;
+
+	for (;;)
+	{
+		wc->SendPacket(voltage);
+		wc->RecievePacket(voltage);
+		wc->SendPacket(amperage);
+		wc->RecievePacket(amperage);
+
+		wc->ThreadCommunicator(voltage.data, amperage.data);
+	}
+	return 0;
+}
+
+void WirelessConnector::SetVoltageTS(int value)
+{
+	this->TakeMutex();
+	this->voltageNonTS = value;
+	this->ReleaseMutex();
+}
+
+void WirelessConnector::SetAmperageTS(int value)
+{
+	this->TakeMutex();
+	this->voltageNonTS = value;
+	this->ReleaseMutex();
+}
+
+int WirelessConnector::GetVoltageTS()
+{
+	int voltage = 0;
+	this->TakeMutex();
+	voltage = this->voltageNonTS;
+	this->ReleaseMutex();
+	return voltage;
+}
+
+int WirelessConnector::GetAmperageTS()
+{
+	int amperage = 0;
+	this->TakeMutex();
+	amperage = this->amperageNonTS;
+	this->ReleaseMutex();
+	return amperage;
+}
+
+void WirelessConnector::ReleaseMutex()
+{
+	if (!::ReleaseMutex(this->hMutex))
+		throw Exception(L"unable to release mutex");
+}
+
+void WirelessConnector::TakeMutex()
+{
+	DWORD result;
+	do
+	{
+		result = WaitForSingleObject(this->hMutex, INFINITE);
+	}
+	while (result == WAIT_TIMEOUT);
+
+	switch (result)
+	{
+	case WAIT_ABANDONED:
+		throw Exception(L"mutex has been abandoned");
+		break;
+	case WAIT_FAILED:
+		throw Exception(L"mutex failed when tried to wait");
+		break;
+	}
+}
+
+void WirelessConnector::ThreadCommunicator(int voltageFromThread, int amperageFromThread)
+{
+	this->TakeMutex();
+	this->voltageNonTS = voltageFromThread;
+	this->amperageNonTS = amperageFromThread;
+	this->ReleaseMutex();
 }
